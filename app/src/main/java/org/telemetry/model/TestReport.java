@@ -30,7 +30,7 @@ public class TestReport {
         this.modelName = modelName;
         this.aiDiagnosticReport = aiDiagnosticReport;
         this.rawTelemetryJson = rawTelemetryJson;
-        this.testDate = LocalDateTime.now(); // Automatically stamp the time!
+        this.testDate = LocalDateTime.now(); // Automatically stamp the time
     }
 
     public Long getId() { return id; }

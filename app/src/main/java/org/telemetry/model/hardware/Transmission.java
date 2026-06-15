@@ -3,7 +3,7 @@ package org.telemetry.model.hardware;
 public class Transmission {
     private final double[] gearRatios;
     private final double finalDriveRatio;
-    private final double efficiency; //NEW: e.g., 0.85 means a 15% power loss
+    private final double efficiency; // 0.85 means a 15% power loss
     private int currentGearIndex = 0;
 
     public Transmission(double[] gearRatios, double finalDriveRatio, double efficiency) {

@@ -1,23 +1,37 @@
 package org.telemetry.model;
 
-import org.telemetry.model.hardware.Transmission; // NEW
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Transient;
+import org.telemetry.model.hardware.Transmission;
 import org.telemetry.sensor.Sensor;
 import java.util.ArrayList;
 import java.util.List;
 
+@Entity
 public class Vehicle {
-    private final String vin;
-    private final String model;
-    private final double maxSafeRpm;
 
-    private final double weightKg;
-    private final double maxEngineTorqueNm;
-    private final double aerodynamicDrag;
+    @Id
+    private String vin; // The VIN is naturally unique
 
-    private final Transmission transmission;
-    private final double wheelRadiusMeters;
+    private String model;
+    private double maxSafeRpm;
+    private double weightKg;
+    private double maxEngineTorqueNm;
+    private double aerodynamicDrag;
+    private double wheelRadiusMeters;
 
-    private final List<Sensor> customSensors;
+    // Ignored by the database for now to keep things simple
+    @Transient
+    private Transmission transmission;
+
+    @Transient
+    private List<Sensor> customSensors;
+
+    // Mandatory JPA no-args constructor
+    protected Vehicle() {
+        this.customSensors = new ArrayList<>();
+    }
 
     public Vehicle(String vin, String model, double maxSafeRpm, double weightKg,
                    double maxEngineTorqueNm, double aerodynamicDrag,
@@ -42,9 +56,6 @@ public class Vehicle {
     public double getWeightKg() { return weightKg; }
     public double getMaxEngineTorqueNm() { return maxEngineTorqueNm; }
     public double getAerodynamicDrag() { return aerodynamicDrag; }
-
-    // Getters for the new components
     public Transmission getTransmission() { return transmission; }
     public double getWheelRadiusMeters() { return wheelRadiusMeters; }
 }
-

@@ -31,7 +31,7 @@ public class TestSession {
         this.telemetryLog = new ArrayList<>();
     }
 
-    // The hot-swap method for the AI playlist orchestrator
+    // The hot swap method for the AI playlist orchestrator
     public void setAutopilot(Autopilot newAutopilot) {
         this.autopilot = newAutopilot;
     }
