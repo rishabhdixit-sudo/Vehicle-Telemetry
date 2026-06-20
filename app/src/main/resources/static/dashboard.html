@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Skynet Telemetry Command</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone@7.23.6/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .custom-scrollbar::-webkit-scrollbar { width: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #0a0a0a; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #1e3a8a; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
+    </style>
+</head>
+<body class="bg-[#050505] text-white min-h-screen font-sans">
+<div id="root"></div>
+
+<script type="text/babel" data-type="module" data-presets="react">
+    const { useState, useEffect, useRef } = React;
+
+    const vehiclePresets = {
+        "Peterbilt 389": { name: "Peterbilt 389", type: "Truck", image: "https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?auto=format&fit=crop&w=500&q=80", vin: "TRUCK-001", model: "Peterbilt 389", maxSafeRpm: 4000, weightKg: 8500, maxEngineTorqueNm: 1800, aerodynamicDrag: 0.85, wheelRadiusMeters: 0.55, gearRatios: "8.5, 6.2, 4.5, 3.2, 2.1, 1.5, 1.0, 0.75", finalDriveRatio: 4.10, transmissionEfficiency: 0.80, requestedSensors: "Exhaust_Temp_C, Turbo_PSI, Oil_Pressure" },
+        "Yamaha R1": { name: "Yamaha R1", type: "Bike", image: "https://images.unsplash.com/photo-1568772585407-9361f9bf3a87?auto=format&fit=crop&w=500&q=80", vin: "MOTO-R1", model: "Yamaha R1", maxSafeRpm: 14000, weightKg: 200, maxEngineTorqueNm: 112, aerodynamicDrag: 0.35, wheelRadiusMeters: 0.30, gearRatios: "2.60, 1.90, 1.50, 1.30, 1.10, 1.00", finalDriveRatio: 2.50, transmissionEfficiency: 0.92, requestedSensors: "Temp_C, ChainTension_Nm" },
+        "Porsche 911": {
+            name: "Porsche 911 GT3", type: "Car", image: "...",
+            vin: "CAR-911", model: "Porsche 911 GT3",
+            maxSafeRpm: 9000, weightKg: 1435, maxEngineTorqueNm: 470,
+            aerodynamicDrag: 0.33, wheelRadiusMeters: 0.35,
+            gearRatios: "3.75, 2.38, 1.72, 1.34, 1.11, 0.96, 0.84",
+            finalDriveRatio: 3.97, transmissionEfficiency: 0.88,
+            // 🛑 THE MASSIVE UPGRADE:
+            requestedSensors: "Coolant_Temp_C, Intake_Air_Temp, Oil_Pressure_PSI, Exhaust_Gas_Temp_C, Air_Fuel_Ratio, Throttle_Position_Pct, Ignition_Timing_Deg, Fuel_Pressure"
+        }
+    };
+
+    const getMetricStyling = (key) => {
+        const l = key.toLowerCase();
+        if (l.includes('rpm')) return { color: 'text-red-500', border: 'border-red-500', hex: '#ef4444', icon: '⏱️' };
+        if (l.includes('temp')) return { color: 'text-cyan-400', border: 'border-cyan-400', hex: '#22d3ee', icon: '🌡️' };
+        if (l.includes('torque') || l.includes('psi')) return { color: 'text-yellow-400', border: 'border-yellow-400', hex: '#facc15', icon: '⚙️' };
+        return { color: 'text-gray-300', border: 'border-gray-500', hex: '#d1d5db', icon: '📊' };
+    };
+
+    function IndividualChart({ metricKey, currentVal, history }) {
+        const canvasRef = useRef(null);
+        const chartInstance = useRef(null);
+        const style = getMetricStyling(metricKey);
+
+        useEffect(() => {
+            if (!chartInstance.current && canvasRef.current) {
+                chartInstance.current = new Chart(canvasRef.current.getContext('2d'), {
+                    type: 'line', data: { labels: [], datasets: [] },
+                    options: { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { grid: { color: '#222' }, ticks: { color: style.hex } } } }
+                });
+            }
+            if (chartInstance.current) {
+                const chart = chartInstance.current;
+                chart.data.labels = history.map((_, i) => i);
+                chart.data.datasets = [{ data: history.map(dp => dp.metrics[metricKey] || 0), borderColor: style.hex, borderWidth: 2, pointRadius: 0, tension: 0.2 }];
+                chart.update();
+            }
+        }, [history, metricKey]);
+
+        return (
+            <div className={`bg-[#161616] p-4 rounded-xl border-t-4 ${style.border} shadow-lg h-56 flex flex-col`}>
+                <div className="flex justify-between items-center mb-1">
+                    <h3 className="text-gray-400 text-xs font-bold uppercase">{metricKey.replace(/_/g, ' ')}</h3>
+                    <span>{style.icon}</span>
+                </div>
+                <p className={`text-2xl font-mono font-bold mb-2 ${style.color}`}>{currentVal ? currentVal.toFixed(1) : "0.0"}</p>
+                <div className="flex-1 relative w-full h-full"><canvas ref={canvasRef}></canvas></div>
+            </div>
+        );
+    }
+
+    function App() {
+        const [view, setView] = useState('LANDING');
+        const [isAiLoading, setIsAiLoading] = useState(false);
+        const [activeVehicle, setActiveVehicle] = useState(null);
+
+        const availableScenarios = ["Winter Cold Start", "Desert Endurance", "Mountain Climb", "High Speed Wet", "Standard Factory Loop"];
+        const [selectedScenarios, setSelectedScenarios] = useState(["Standard Factory Loop"]);
+
+        const [telemetryHistory, setTelemetryHistory] = useState([]);
+        const [currentData, setCurrentData] = useState(null);
+        const [isConnected, setIsConnected] = useState(false);
+        const terminalRef = useRef(null);
+
+        const [finalReport, setFinalReport] = useState(null);
+        const [reportSlide, setReportSlide] = useState(0);
+        const metricKeys = currentData && currentData.metrics ? Object.keys(currentData.metrics) : [];
+
+        useEffect(() => {
+            if (terminalRef.current) terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+        }, [telemetryHistory]);
+
+        useEffect(() => {
+            const socket = new WebSocket('ws://localhost:8080/ws/telemetry');
+            socket.onopen = () => setIsConnected(true);
+            socket.onclose = () => setIsConnected(false);
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.metrics && data.metrics.TEST_COMPLETE) {
+                    setIsAiLoading(true);
+                    setTimeout(() => {
+                        // Failsafe: check if activeVehicle exists before calling API
+                        if(activeVehicle) {
+                            fetch(`http://localhost:8080/api/reports/latest/${activeVehicle.vin}`)
+                                .then(res => res.json())
+                                .then(reportData => {
+                                    setFinalReport(reportData);
+                                    setReportSlide(0);
+                                    setView('REPORT');
+                                    setIsAiLoading(false);
+                                }).catch(err => {
+                                console.error("Failed to fetch report", err);
+                                setIsAiLoading(false);
+                            });
+                        }
+                    }, 1500);
+                    return;
+                }
+
+                setIsAiLoading(false);
+                setCurrentData(data);
+                setTelemetryHistory(prev => {
+                    const updated = [...prev, data];
+                    if (updated.length > 50) updated.shift();
+                    return updated;
+                });
+            };
+            return () => socket.close();
+        }, [activeVehicle]);
+
+        const toggleScenario = (scenario) => {
+            setSelectedScenarios(prev => prev.includes(scenario) ? prev.filter(s => s !== scenario) : [...prev, scenario]);
+        };
+
+        const triggerTest = async (testMode) => {
+            if (testMode === 'CUSTOM' && selectedScenarios.length === 0) {
+                alert("Please select at least one custom scenario.");
+                return;
+            }
+            setView('DASHBOARD');
+            setIsAiLoading(true);
+            setTelemetryHistory([]);
+            setCurrentData(null);
+
+            const payload = {
+                ...activeVehicle,
+                maxSafeRpm: parseFloat(activeVehicle.maxSafeRpm),
+                weightKg: parseFloat(activeVehicle.weightKg),
+                maxEngineTorqueNm: parseFloat(activeVehicle.maxEngineTorqueNm),
+                aerodynamicDrag: parseFloat(activeVehicle.aerodynamicDrag),
+                wheelRadiusMeters: parseFloat(activeVehicle.wheelRadiusMeters),
+                finalDriveRatio: parseFloat(activeVehicle.finalDriveRatio),
+                transmissionEfficiency: parseFloat(activeVehicle.transmissionEfficiency),
+                temperatureCelsius: 20,
+                atmosphericPressureHpa: 1013,
+                gearRatios: activeVehicle.gearRatios.split(',').map(s => parseFloat(s.trim())),
+                requestedSensors: activeVehicle.requestedSensors.split(',').map(s => s.trim()),
+                testMode: testMode,
+                customScenarios: testMode === 'COMPREHENSIVE' ? [] : selectedScenarios
+            };
+
+            await fetch('http://localhost:8080/api/test/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).catch(() => setIsAiLoading(false));
+        };
+
+        if (view === 'LANDING') {
+            return (
+                <div className="flex flex-col items-center justify-center min-h-screen text-center p-6 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-gray-900 to-black">
+                    <h1 className="text-7xl font-black text-white mb-2 tracking-tighter">SKYNET</h1>
+                    <h2 className="text-xl font-bold text-cyan-500 mb-6 tracking-widest uppercase">Automotive Intelligence</h2>
+                    <p className="text-gray-400 mb-10 max-w-2xl text-lg leading-relaxed">
+                        Welcome to the next generation of dynamometer software. Validate engine physics and aerodynamic stress in real-time without leaving the lab.
+                    </p>
+                    <button onClick={() => setView('VEHICLE_SELECT')} className="bg-white text-black hover:bg-cyan-400 hover:text-black px-10 py-4 rounded font-black text-lg transition-all duration-300 shadow-[0_0_20px_rgba(34,211,238,0.3)] hover:shadow-[0_0_30px_rgba(34,211,238,0.6)]">
+                        INITIALIZE SYSTEM
+                    </button>
+                </div>
+            );
+        }
+
+        if (view === 'VEHICLE_SELECT') {
+            return (
+                <div className="p-8 max-w-6xl mx-auto min-h-screen flex flex-col justify-center">
+                    <div className="text-center mb-10">
+                        <h2 className="text-4xl font-black text-white mb-2">Select Target Vehicle</h2>
+                        <p className="text-gray-500">Choose a predefined profile or build a custom chassis.</p>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
+                        {Object.values(vehiclePresets).map(preset => (
+                            <div key={preset.name} onClick={() => { setActiveVehicle(preset); setView('TEST_SELECT'); }} className="group bg-[#111] rounded-xl overflow-hidden cursor-pointer border border-gray-800 hover:border-cyan-500 transition-all duration-300">
+                                <div className="h-48 overflow-hidden">
+                                    <img src={preset.image} className="w-full h-full object-cover opacity-70 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500"/>
+                                </div>
+                                <div className="p-6">
+                                    <p className="text-xs text-cyan-400 font-bold tracking-widest uppercase mb-1">{preset.type}</p>
+                                    <h3 className="text-2xl font-bold text-white">{preset.name}</h3>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="text-center">
+                        <button onClick={() => { setActiveVehicle({...vehiclePresets["Peterbilt 389"], name: "Custom Build", vin: "CUSTOM-01", type: "Car"}); setView('CUSTOMIZE'); }} className="bg-transparent border border-gray-600 hover:border-white text-gray-300 hover:text-white px-8 py-3 rounded font-bold transition-all">
+                            + Build Custom Vehicle
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        if (view === 'CUSTOMIZE') {
+            return (
+                <div className="p-8 max-w-4xl mx-auto min-h-screen">
+                    <div className="flex justify-between items-center mb-8 border-b border-gray-800 pb-4">
+                        <h2 className="text-3xl font-bold text-white">🔧 Custom Chassis Builder</h2>
+                        <button onClick={() => setView('VEHICLE_SELECT')} className="text-gray-500 hover:text-white font-bold">← Back</button>
+                    </div>
+                    <div className="bg-[#111] p-8 rounded-xl border border-gray-800 shadow-lg">
+                        <div className="mb-6">
+                            <label className="text-sm text-cyan-400 font-bold block mb-2">Vehicle Type</label>
+                            <select value={activeVehicle?.type} onChange={(e) => setActiveVehicle({...activeVehicle, type: e.target.value})} className="bg-black border border-gray-700 rounded px-4 py-2 text-white outline-none">
+                                <option>Car</option><option>Bike</option><option>Truck</option>
+                            </select>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-6 mb-8">
+                            <div><label className="text-xs text-gray-500">VIN</label><input value={activeVehicle?.vin} onChange={(e) => setActiveVehicle({...activeVehicle, vin: e.target.value})} className="w-full bg-black border border-gray-700 rounded px-3 py-2 text-white" /></div>
+                            <div><label className="text-xs text-gray-500">Model Name</label><input value={activeVehicle?.model} onChange={(e) => setActiveVehicle({...activeVehicle, model: e.target.value})} className="w-full bg-black border border-gray-700 rounded px-3 py-2 text-white" /></div>
+                            <div><label className="text-xs text-gray-500">Max RPM</label><input value={activeVehicle?.maxSafeRpm} onChange={(e) => setActiveVehicle({...activeVehicle, maxSafeRpm: e.target.value})} className="w-full bg-black border border-gray-700 rounded px-3 py-2 text-white" /></div>
+                            <div><label className="text-xs text-gray-500">Weight (Kg)</label><input value={activeVehicle?.weightKg} onChange={(e) => setActiveVehicle({...activeVehicle, weightKg: e.target.value})} className="w-full bg-black border border-gray-700 rounded px-3 py-2 text-white" /></div>
+                            <div><label className="text-xs text-gray-500">Torque (Nm)</label><input value={activeVehicle?.maxEngineTorqueNm} onChange={(e) => setActiveVehicle({...activeVehicle, maxEngineTorqueNm: e.target.value})} className="w-full bg-black border border-gray-700 rounded px-3 py-2 text-white" /></div>
+                            <div><label className="text-xs text-gray-500">Aero Drag</label><input value={activeVehicle?.aerodynamicDrag} onChange={(e) => setActiveVehicle({...activeVehicle, aerodynamicDrag: e.target.value})} className="w-full bg-black border border-gray-700 rounded px-3 py-2 text-white" /></div>
+                            <div className="col-span-3"><label className="text-xs text-cyan-500">Sensors (Comma separated)</label><input value={activeVehicle?.requestedSensors} onChange={(e) => setActiveVehicle({...activeVehicle, requestedSensors: e.target.value})} className="w-full bg-black border border-gray-700 rounded px-3 py-2 text-cyan-300" /></div>
+                        </div>
+                        <button onClick={() => setView('TEST_SELECT')} className="w-full bg-white hover:bg-gray-200 text-black font-black py-4 rounded text-lg">Save & Proceed to Testing</button>
+                    </div>
+                </div>
+            );
+        }
+
+        if (view === 'TEST_SELECT') {
+            return (
+                <div className="p-8 max-w-5xl mx-auto min-h-screen flex flex-col justify-center">
+                    <div className="flex justify-between items-center mb-10 border-b border-gray-800 pb-4">
+                        <div>
+                            <h2 className="text-4xl font-black text-white">Select Test Protocol</h2>
+                            <p className="text-gray-500 mt-1">Vehicle Locked: <span className="text-cyan-400 font-bold">{activeVehicle?.name}</span></p>
+                        </div>
+                        <button onClick={() => setView('VEHICLE_SELECT')} className="text-gray-500 hover:text-white font-bold">← Change Vehicle</button>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div className="bg-gradient-to-br from-blue-900 to-[#111] p-8 rounded-2xl border border-blue-500 shadow-[0_0_30px_rgba(37,99,235,0.2)]">
+                            <h3 className="text-3xl font-black text-white mb-2">🤖 AI Comprehensive</h3>
+                            <p className="text-gray-300 mb-6 min-h-[80px]">Skynet will autonomously execute ALL laboratory scenarios back-to-back and provide a complete diagnostic evaluation.</p>
+                            <button onClick={() => triggerTest('COMPREHENSIVE')} className="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-black py-4 rounded shadow-lg transition-all">Execute All Protocols</button>
+                        </div>
+                        <div className="bg-[#111] p-8 rounded-2xl border border-gray-700">
+                            <h3 className="text-3xl font-black text-white mb-2">⚙️ Custom Playlist</h3>
+                            <p className="text-gray-400 mb-4">Select specific scenarios to compile your own testing gauntlet.</p>
+                            <div className="space-y-2 mb-6 bg-black p-4 rounded-xl border border-gray-800">
+                                {availableScenarios.map(scen => (
+                                    <label key={scen} className="flex items-center space-x-3 cursor-pointer group">
+                                        <input type="checkbox" checked={selectedScenarios.includes(scen)} onChange={() => toggleScenario(scen)} className="form-checkbox h-5 w-5 text-cyan-500 rounded border-gray-600 bg-gray-900 cursor-pointer" />
+                                        <span className="text-gray-300 group-hover:text-white text-sm font-medium">{scen}</span>
+                                    </label>
+                                ))}
+                            </div>
+                            <button onClick={() => triggerTest('CUSTOM')} className="w-full bg-gray-800 hover:bg-gray-700 text-white font-bold py-4 rounded border border-gray-600">Execute Selected Protocols</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        if (view === 'DASHBOARD') {
+            return (
+                <div className="p-6 max-w-7xl mx-auto relative min-h-screen">
+                    {isAiLoading && (
+                        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md rounded-xl">
+                            <div className="text-center">
+                                <div className="animate-spin rounded-full h-20 w-20 border-t-4 border-b-4 border-cyan-500 mx-auto mb-6"></div>
+                                <h2 className="text-2xl font-black text-cyan-400 mb-2">SKYNET IS COMPILING SCENARIOS</h2>
+                                <p className="text-gray-400">Negotiating thermodynamics and generating throttle telemetry...</p>
+                            </div>
+                        </div>
+                    )}
+                    <div className="flex justify-between items-center mb-6 bg-[#111] p-4 rounded-xl border border-gray-800 shadow-lg">
+                        <div>
+                            <h1 className="text-2xl font-black text-white tracking-widest">SKYNET LIVE FEED <span className="text-gray-600 font-normal">| {activeVehicle?.name}</span></h1>
+                            <p className="text-sm mt-1 font-mono text-gray-400">UPLINK: {isConnected ? <span className="text-green-500">STABLE</span> : <span className="text-red-500">DISCONNECTED</span>}</p>
+                        </div>
+                        <button onClick={() => setView('VEHICLE_SELECT')} className="bg-red-900/50 hover:bg-red-600 border border-red-800 text-white px-6 py-2 rounded font-bold text-sm transition-all">ABORT SEQUENCE</button>
+                    </div>
+                    {metricKeys.length > 0 && (
+                        <div className={`grid ${metricKeys.length <= 1 ? 'grid-cols-1' : (metricKeys.length === 2 || metricKeys.length === 4 ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1 md:grid-cols-3')} gap-6 mb-6`}>
+                            {metricKeys.map(key => <IndividualChart key={key} metricKey={key} currentVal={currentData?.metrics[key]} history={telemetryHistory} />)}
+                        </div>
+                    )}
+                    <div className="mt-6 border-t border-gray-800 pt-6">
+                        <h3 className="text-sm text-gray-500 mb-2 font-bold uppercase tracking-widest">Live Telemetry Terminal</h3>
+                        <div ref={terminalRef} className="bg-black p-4 rounded-xl border border-gray-800 h-48 overflow-y-auto shadow-inner custom-scrollbar">
+                            {telemetryHistory.length === 0 && <p className="text-gray-600 italic text-xs">Waiting for telemetry stream...</p>}
+                            {telemetryHistory.map((log, index) => (
+                                <div key={index} className="font-mono text-xs mb-1 border-b border-gray-900 pb-1">
+                                    <span className="text-gray-500">[{new Date().toLocaleTimeString()}] </span>
+                                    <span className="text-green-400">{JSON.stringify(log.metrics)}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        if (view === 'REPORT' && finalReport) {
+            const rawLogs = JSON.parse(finalReport.rawTelemetryJson || "[]");
+            const logChunks = [];
+            for (let i = 0; i < rawLogs.length; i += 120) {
+                logChunks.push(rawLogs.slice(i, i + 120));
+            }
+            return (
+                <div className="p-8 max-w-[1400px] mx-auto min-h-screen">
+                    <div className="flex justify-between items-center mb-8 border-b border-gray-800 pb-4">
+                        <div>
+                            <h2 className="text-4xl font-black text-white">CHIEF MECHANIC REPORT</h2>
+                            <p className="text-gray-400 mt-1">Vehicle: <span className="text-cyan-400 font-bold">{finalReport.modelName}</span> | VIN: {finalReport.vin}</p>
+                        </div>
+                        <button onClick={() => setView('VEHICLE_SELECT')} className="bg-white hover:bg-gray-200 text-black px-6 py-3 rounded font-black transition-all">Start New Session</button>
+                    </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        <div className="bg-[#111] p-8 rounded-2xl border border-blue-900 shadow-[0_0_30px_rgba(30,58,138,0.2)]">
+                            <h3 className="text-xl font-bold text-cyan-400 mb-4 tracking-widest border-b border-blue-900 pb-2">📋 AI DIAGNOSTIC EVALUATION</h3>
+                            <div className="text-gray-300 font-sans text-sm whitespace-pre-wrap overflow-y-auto h-[600px] pr-4 custom-scrollbar leading-relaxed">
+                                {finalReport.aiDiagnosticReport}
+                            </div>
+                        </div>
+                        <div className="bg-[#111] p-8 rounded-2xl border border-gray-800">
+                            <div className="flex justify-between items-center mb-4 border-b border-gray-800 pb-2">
+                                <h3 className="text-xl font-bold text-white tracking-widest">📊 RAW TELEMETRY LOGS</h3>
+                                <div className="flex items-center gap-4">
+                                    <button onClick={() => setReportSlide(Math.max(0, reportSlide - 1))} disabled={reportSlide === 0} className="bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-white px-4 py-1 rounded font-bold transition-all">← Prev</button>
+                                    <span className="text-cyan-400 font-bold">Scenario {reportSlide + 1} of {logChunks.length}</span>
+                                    <button onClick={() => setReportSlide(Math.min(logChunks.length - 1, reportSlide + 1))} disabled={reportSlide === logChunks.length - 1} className="bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-white px-4 py-1 rounded font-bold transition-all">Next →</button>
+                                </div>
+                            </div>
+                            <div className="bg-black p-4 rounded-xl border border-gray-900 h-[600px] overflow-y-auto custom-scrollbar">
+                                {logChunks[reportSlide]?.map((log, index) => (
+                                    <div key={index} className="font-mono text-xs mb-3 border-b border-gray-900 pb-3">
+                                        <span className="text-gray-500 block mb-1">Tick {index + 1} | Timestamp: {log.timestamp}</span>
+                                        <span className="text-green-400 block">{JSON.stringify(log.metrics)}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        return null;
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+</script>
+</body>
+</html>

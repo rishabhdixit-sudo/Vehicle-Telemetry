@@ -2,11 +2,8 @@ package org.telemetry.service;
 
 import org.springframework.stereotype.Service;
 import org.telemetry.model.*;
-import org.telemetry.model.hardware.Transmission;
-import org.telemetry.model.hardware.VirtualChassisDyno;
+import org.telemetry.model.physics.PhysicsSimulator;
 import org.telemetry.repository.TestReportRepository;
-import org.telemetry.sensor.CustomSensor;
-import org.telemetry.sensor.RpmSensor;
 import org.telemetry.websocket.LiveTelemetryHandler;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -18,12 +15,13 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class TestSessionService {
 
-    private final Map<String, TestSession> activeSessions = new ConcurrentHashMap<>();
+    private final Map<String, String> activeSessions = new ConcurrentHashMap<>();
     private final LiveTelemetryHandler broadcastHandler;
-    private final OllamaDiagnosticClient aiClient;
+    //private final OllamaDiagnosticClient aiClient;
+    private final GeminiDiagnosticClient aiClient;
     private final TestReportRepository reportRepository;
 
-    public TestSessionService(LiveTelemetryHandler broadcastHandler, OllamaDiagnosticClient aiClient, TestReportRepository reportRepository) {
+    public TestSessionService(LiveTelemetryHandler broadcastHandler, GeminiDiagnosticClient aiClient, TestReportRepository reportRepository) {
         this.broadcastHandler = broadcastHandler;
         this.aiClient = aiClient;
         this.reportRepository = reportRepository;
@@ -36,30 +34,6 @@ public class TestSessionService {
             return;
         }
 
-        // 1. Build Hardware
-        // Convert the List<Double> from the UI into a primitive array for the Transmission
-        double[] gearArray = request.gearRatios().stream().mapToDouble(Double::doubleValue).toArray();
-        Transmission trans = new Transmission(gearArray, request.finalDriveRatio(), request.transmissionEfficiency());
-
-        Vehicle vehicle = new Vehicle(
-                request.vin(), request.model(), request.maxSafeRpm(),
-                request.weightKg(), request.maxEngineTorqueNm(),
-                request.aerodynamicDrag(), trans, request.wheelRadiusMeters()
-        );
-
-        RpmSensor rpm = new RpmSensor(800.0, vehicle.getMaxSafeRpm());
-
-        if (request.requestedSensors() != null) {
-            for (String sensorName : request.requestedSensors()) {
-                vehicle.addCustomSensor(new CustomSensor(sensorName, "Units", 100.0, 10.0, 2.0, rpm));
-            }
-        }
-
-        // 2. Initial Test Cell Setup
-        TestCell testRoom = new TestCell(new Environment(request.temperatureCelsius(), request.atmosphericPressureHpa()), 0.8);
-        VirtualChassisDyno dyno = new VirtualChassisDyno("HORIBA-48", 500.0, vehicle, testRoom);
-
-        // 3. Define the Master Dictionary of Physics Profiles
         record ScenarioProfile(String name, double tempC, double friction) {}
 
         Map<String, ScenarioProfile> masterScenarios = Map.of(
@@ -73,10 +47,8 @@ public class TestSessionService {
         List<ScenarioProfile> playlist = new ArrayList<>();
 
         if ("COMPREHENSIVE".equalsIgnoreCase(request.testMode())) {
-            // Run everything
             playlist.addAll(masterScenarios.values());
         } else {
-            // CUSTOM mode: Look at what the user checked in the UI
             if (request.customScenarios() != null && !request.customScenarios().isEmpty()) {
                 for (String scenarioName : request.customScenarios()) {
                     if (masterScenarios.containsKey(scenarioName)) {
@@ -84,62 +56,64 @@ public class TestSessionService {
                     }
                 }
             } else {
-                // Failsafe
                 playlist.add(masterScenarios.get("Standard Factory Loop"));
             }
         }
 
-        // 4. Spin up the Background Thread
         new Thread(() -> {
-            try {
-                // Initialize an empty session container
-                TestSession session = new TestSession(vehicle, rpm, dyno, null);
-                activeSessions.put(vin, session);
+            activeSessions.put(vin, "RUNNING");
+            List<DataPoint> fullLog = new ArrayList<>();
 
-                // Run the playlist sequentially
+            try {
                 for (ScenarioProfile profile : playlist) {
                     System.out.println("ORCHESTRATOR QUEUING: " + profile.name());
 
-                    // 1. HOT-SWAP THE DYNO PHYSICS
-                    testRoom.setEnvironment(new Environment(profile.tempC(), request.atmosphericPressureHpa()));
-                    testRoom.setTrackSurfaceFriction(profile.friction());
-
-                    // 2. HAVE AI WRITE THE SCRIPT FOR THIS SPECIFIC WEATHER
                     String scenarioContext = String.format("%s at %.1f Celsius with %.1f grip", profile.name(), profile.tempC(), profile.friction());
                     DriveCycle cycle = aiClient.generatePreFlightScript(request, scenarioContext);
 
-                    // 3. PUT THE AI IN THE DRIVER'S SEAT AND RUN
-                    session.setAutopilot(new Autopilot(cycle));
-                    session.runTest(dataPoint -> broadcastHandler.broadcast(dataPoint));
+                    // INITIALIZE THE NEW REAL-WORLD PHYSICS ENGINE
+                    PhysicsSimulator simulator = new PhysicsSimulator(request, profile.tempC(), request.atmosphericPressureHpa(), profile.friction());
+
+                    // EXECUTE THE 60-SECOND LIVE LOOP
+                    for (int tick = 0; tick < 120; tick++) {
+                        // If user clicked 'Abort' in UI, this safely kills the thread
+                        if (!activeSessions.containsKey(vin)) break;
+
+                        double throttle = cycle.getTargetThrottle(tick);
+
+                        // Advance physics by 0.5 seconds
+                        Map<String, Double> metrics = simulator.calculateNextTick(throttle, 0.5);
+                        metrics.put("CURRENT_SCENARIO", (double) profile.name().hashCode());
+
+                        DataPoint dp = new DataPoint(System.currentTimeMillis(), metrics);
+                        fullLog.add(dp);
+                        broadcastHandler.broadcast(dp);
+
+                        Thread.sleep(500);
+                    }
                 }
 
                 activeSessions.remove(vin);
 
-                // Final diagnostic report
-                String aiReport = aiClient.generateReport(session.getFullLog(), request.testMode());
+                String aiReport = aiClient.generateReport(fullLog, request.testMode());
 
-                // Persist Data
-                String rawJsonLog = new ObjectMapper().writeValueAsString(session.getFullLog());
-                reportRepository.save(new TestReport(vehicle.getVin(), vehicle.getModel(), aiReport, rawJsonLog));
+                String rawJsonLog = new ObjectMapper().writeValueAsString(fullLog);
+                reportRepository.save(new TestReport(request.vin(), request.model(), aiReport, rawJsonLog));
                 System.out.println("Orchestration Complete! Saved to MySQL.");
 
-                // Send a signal to React that the test is officially over
                 Map<String, Double> completeSignal = new java.util.HashMap<>();
                 completeSignal.put("TEST_COMPLETE", 1.0);
                 broadcastHandler.broadcast(new DataPoint(System.currentTimeMillis(), completeSignal));
 
             } catch (Exception e) {
                 e.printStackTrace();
+                activeSessions.remove(vin);
                 Thread.currentThread().interrupt();
             }
         }).start();
     }
 
     public void stopRun(String vin) {
-        TestSession session = activeSessions.get(vin);
-        if (session != null) {
-            session.stop();
-            activeSessions.remove(vin);
-        }
+        activeSessions.remove(vin);
     }
 }

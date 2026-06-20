@@ -12,21 +12,20 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Collections;
+import java.util.*;
 
 @Service
-public class OllamaDiagnosticClient {
+public class GeminiDiagnosticClient {
 
-    private final String ollamaUrl = "http://localhost:11434/api/generate";
-    private final String modelName = "qwen2.5-coder:3b";
+
+    private final String GEMINI_API_KEY = "api key";
+
+    private final String geminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=" + GEMINI_API_KEY;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newHttpClient();
 
-    // METHOD 1: GENERATES THE SCRIPT (Returns a DriveCycle)
+    // GENERATES THE SCRIPT FOR THE AUTOPILOT
     public DriveCycle generatePreFlightScript(VehicleRequest request, String scenarioDetails) {
         String prompt = String.format(
                 "Act as an automated dynamometer script generator. Test a %s weighing %.1f kg. " +
@@ -37,10 +36,12 @@ public class OllamaDiagnosticClient {
                 request.model(), request.weightKg(), scenarioDetails
         );
 
-        System.out.println(" AI is writing drive script for: " + scenarioDetails);
+        System.out.println(" Gemini AI is writing drive script for: " + scenarioDetails);
 
         try {
-            String aiResponse = sendToOllama(prompt);
+            String aiResponse = sendToGemini(prompt);
+
+            // Clean up the response in case Gemini adds markdown code blocks
             String cleanJson = aiResponse.replaceAll("```json", "").replaceAll("```", "").trim();
             int startIndex = cleanJson.indexOf("[");
             int endIndex = cleanJson.lastIndexOf("]");
@@ -50,23 +51,21 @@ public class OllamaDiagnosticClient {
             }
 
             List<Double> script = objectMapper.readValue(cleanJson, new TypeReference<List<Double>>(){});
-            while (script.size() < 120) script.add(0.0);
+            while (script.size() < 120) script.add(0.0); // Failsafe pad
 
             return new DriveCycle(scenarioDetails, script.subList(0, 120));
         } catch (Exception e) {
-            // THIS IS WHERE WE CATCH SCRIPT ERRORS
-            e.printStackTrace(); // This prints the exact reason why it failed!
-            System.err.println("AI failed script generation or timed out! Using safe fallback.");
+            e.printStackTrace();
+            System.err.println("⚠️ Gemini failed script generation. Using safe fallback.");
             return new DriveCycle("Fallback Script", Collections.nCopies(120, 0.85));
         }
     }
 
-    // METHOD 2: GENERATES THE POST-TEST REPORT (Returns a String)
+    // GENERATES THE POST-TEST REPORT
     public String generateReport(List<DataPoint> telemetryData, String testMode) {
-        System.out.println("Generating " + testMode + " diagnostic report...");
+        System.out.println(" Gemini AI Generating " + testMode + " diagnostic report...");
 
         StringBuilder promptBuilder = new StringBuilder();
-
         promptBuilder.append("You are a strict Senior Automotive Mechanic evaluating dynamometer telemetry. You are NOT a programmer.\n");
         promptBuilder.append("CRITICAL INSTRUCTIONS:\n1. DO NOT write any Python, Java, or computer code.\n2. DO NOT output mathematical formulas.\n");
 
@@ -90,33 +89,43 @@ public class OllamaDiagnosticClient {
         promptBuilder.append("```\n");
 
         try {
-            return sendToOllama(promptBuilder.toString()).trim();
+            return sendToGemini(promptBuilder.toString()).trim();
         } catch (Exception e) {
-            // THIS IS WHERE WE CATCH REPORT ERRORS
             e.printStackTrace();
-            return "AI Analysis Failed. Error: " + e.getMessage(); // Returns a string!
+            return "AI Analysis Failed. Error: " + e.getMessage();
         }
     }
 
-    private String sendToOllama(String prompt) throws Exception {
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", modelName);
-        requestBody.put("prompt", prompt);
-        requestBody.put("stream", false);
+    //  THE CORE HTTP BRIDGE TO GOOGLE'S SERVERS
+    private String sendToGemini(String prompt) throws Exception {
 
-        Map<String, Object> options = new HashMap<>();
-        options.put("temperature", 0.7);
-        options.put("num_ctx", 4096);
-        requestBody.put("options", options);
+        Map<String, Object> textNode = Map.of("text", prompt);
+        Map<String, Object> partsNode = Map.of("parts", List.of(textNode));
+        Map<String, Object> requestBody = Map.of("contents", List.of(partsNode));
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(ollamaUrl))
+                .uri(URI.create(geminiUrl))
                 .header("Content-Type", "application/json")
-                .timeout(java.time.Duration.ofSeconds(120)) // ⏱️ 15 Second cutoff prevents UI freeze!
+                .timeout(java.time.Duration.ofSeconds(60))
                 .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(requestBody)))
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        return objectMapper.readTree(response.body()).get("response").asText();
+
+        // Print the exact response from Google to the console!
+        System.out.println("🔍 RAW GEMINI RESPONSE: " + response.body());
+
+        JsonNode rootNode = objectMapper.readTree(response.body());
+
+        // Catch API Errors so Java doesn't crash with a NullPointerException
+        if (rootNode.has("error")) {
+            throw new Exception("Google API Error: " + rootNode.path("error").path("message").asText());
+        }
+
+        if (!rootNode.has("candidates") || rootNode.path("candidates").isEmpty()) {
+            throw new Exception("Gemini returned an empty response. Check safety filters or quota.");
+        }
+
+        return rootNode.path("candidates").get(0).path("content").path("parts").get(0).path("text").asText();
     }
 }
